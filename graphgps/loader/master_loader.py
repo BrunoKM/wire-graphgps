@@ -2,10 +2,13 @@ import logging
 import os.path as osp
 import time
 from functools import partial
+from typing import Any, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch_geometric.transforms as T
+from torch_geometric.data import Data
 from numpy.random import default_rng
 from ogb.graphproppred import PygGraphPropPredDataset
 from torch_geometric.datasets import (Actor, GNNBenchmarkDataset, Planetoid,
@@ -13,6 +16,8 @@ from torch_geometric.datasets import (Actor, GNNBenchmarkDataset, Planetoid,
 from torch_geometric.graphgym.config import cfg
 from torch_geometric.graphgym.loader import load_pyg, load_ogb, set_dataset_attr
 from torch_geometric.graphgym.register import register_loader
+from torch_geometric.transforms import AddLaplacianEigenvectorPE
+from torch_geometric.utils import to_scipy_sparse_matrix, get_laplacian
 
 from graphgps.loader.dataset.aqsol_molecules import AQSOL
 from graphgps.loader.dataset.coco_superpixels import COCOSuperpixels
@@ -25,6 +30,112 @@ from graphgps.transform.task_preprocessing import task_specific_preprocessing
 from graphgps.transform.transforms import (pre_transform_in_memory,
                                            typecast_x, concat_x_and_pos,
                                            clip_graphs_to_size)
+
+
+def add_node_attr(data: Data, value: torch.Tensor, attr_name: str) -> Data:
+    data[attr_name] = value
+    return data
+
+
+class AddLaplacianEigenvectorAugPE(AddLaplacianEigenvectorPE):
+
+    SPARSE_THRESHOLD: int = 100
+
+    def __init__(
+        self,
+        k: int,
+        attr_name: Optional[str] = "laplacian_eigenvector_pe",
+        is_undirected: bool = False,
+        normalization: Optional[str] = "sym",
+        random_sgn: bool = True,
+        normalize: bool = True,
+        pos_eig_only: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(k)
+        self.k = k
+        self.attr_name = attr_name
+        self.is_undirected = is_undirected
+        self.normalization = normalization
+        self.kwargs = kwargs
+        self.random_sgn = random_sgn
+        self.normalize = normalize
+        self.pos_eig_only = pos_eig_only
+
+    def forward(self, data: Data) -> Data:
+        assert data.edge_index is not None
+        num_nodes = data.num_nodes
+        assert num_nodes is not None
+
+        edge_index, edge_weight = get_laplacian(
+            data.edge_index,
+            data.edge_weight,
+            normalization=self.normalization,
+            num_nodes=num_nodes,
+        )
+
+        L = to_scipy_sparse_matrix(edge_index, edge_weight, num_nodes)
+
+        if num_nodes < self.SPARSE_THRESHOLD:
+            from numpy.linalg import eig, eigh
+
+            eig_fn = eig if not self.is_undirected else eigh
+
+            eig_vals, eig_vecs = eig_fn(L.todense())
+        else:
+            from scipy.sparse.linalg import eigs, eigsh
+
+            eig_fn = eigs if not self.is_undirected else eigsh
+            try:
+                eig_vals, eig_vecs = eig_fn(
+                    L,
+                    k=self.k + 1,
+                    which="SR" if not self.is_undirected else "SA",
+                    return_eigenvectors=True,
+                    **self.kwargs,
+                )
+            except:
+                print(
+                    "Eigenvalue and eigenvector construction failed, defaulting to all 0's."
+                )
+                eig_vals = np.zeros(self.k + 1)
+                eig_vecs = np.zeros((num_nodes, self.k + 1))
+
+        idx = eig_vals.argsort()
+        eig_vecs = np.real(eig_vecs[:, idx])
+        eig_vals = eig_vals[idx]
+        if self.pos_eig_only:
+            eig_vals = torch.from_numpy(np.real(eig_vals)).clamp_min(0)
+        else:
+            eig_vals = torch.from_numpy(np.real(eig_vals))
+
+        if num_nodes <= self.k:
+            pe = torch.from_numpy(eig_vecs[:, 1:num_nodes])
+            eig_vals = F.pad(
+                eig_vals, (0, self.k - num_nodes), value=float("nan")
+            ).unsqueeze(0)
+            if self.normalize:
+                pe = F.normalize(pe, p=2, dim=-1)
+            # Pad with zeros to the right length k
+            # padding = torch.zeros(num_nodes, self.k - pe.size(1))
+            # pe = torch.cat([pe, padding], dim=1)
+            pe = F.pad(pe, (0, self.k - pe.size(1)), value=float("nan"))
+        else:
+            pe = torch.from_numpy(eig_vecs[:, 1 : self.k + 1]).float()
+            eig_vals = eig_vals[1 : self.k + 1]
+            if self.normalize:
+                pe = F.normalize(pe, p=2, dim=-1)
+
+        if self.random_sgn:
+            sign = -1 + 2 * torch.randint(0, 2, (self.k,))
+            pe *= sign
+
+        eig_vals = eig_vals.repeat(num_nodes, 1).unsqueeze(2)
+
+        # data = add_node_attr(data, pe, attr_name=self.attr_name)
+        data = add_node_attr(data, eig_vals.float(), attr_name="EigVals")
+        data = add_node_attr(data, pe.float(), attr_name=self.attr_name)
+        return data
 
 
 def log_loaded_dataset(dataset, format, name):
