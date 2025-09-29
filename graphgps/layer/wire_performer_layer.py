@@ -453,6 +453,7 @@ class Attention(nn.Module):
                 q, k = apply_rotary_pos_emb(q, k, pos_emb)
 
             angles = self.rope_pos_proj(wire_pe) * self.rope_angle_scale
+            angles = rearrange(angles, "b n (h d) -> b h n d", h=h)
             q, k = apply_rope(q=q, k=k, angles=angles)
 
             out = self.fast_attention(q, k, v)
