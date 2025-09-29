@@ -422,24 +422,25 @@ class Attention(nn.Module):
     def __init__(
         self,
         dim,
-        causal = False,
-        heads = 8,
-        dim_head = 64,
-        local_heads = 0,
-        local_window_size = 256,
-        nb_features = None,
-        feature_redraw_interval = 1000,
-        generalized_attention = False,
-        kernel_fn = nn.ReLU(),
-        dropout = 0.,
-        no_projection = False,
-        qkv_bias = False,
-        attn_out_bias = True
+        causal=False,
+        heads=8,
+        dim_head=64,
+        local_heads=0,
+        local_window_size=256,
+        nb_features=None,
+        feature_redraw_interval=1000,
+        generalized_attention=False,
+        kernel_fn=nn.ReLU(),
+        dropout=0.0,
+        no_projection=False,
+        qkv_bias=False,
+        attn_out_bias=True,
     ):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
         dim_head = default(dim_head, dim // heads)
         inner_dim = dim_head * heads
+        self.heads = heads
 
         self.fast_attention = FastAttention(
             dim_head,
@@ -449,7 +450,6 @@ class Attention(nn.Module):
             kernel_fn = kernel_fn,
             no_projection = no_projection)
 
-        self.heads = heads
         self.global_heads = heads - local_heads
         self.local_attn = LocalAttention(
             window_size = local_window_size,
@@ -464,7 +464,15 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim, bias = attn_out_bias)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, pos_emb = None, context = None, mask = None, context_mask = None, **kwargs):
+    def forward(
+        self,
+        x,
+        pos_emb=None,
+        context=None,
+        mask=None,
+        context_mask=None,
+        **kwargs,
+    ):
 
         b, n, _, h, gh = *x.shape, self.heads, self.global_heads
 
@@ -502,10 +510,12 @@ class Attention(nn.Module):
         out = self.to_out(out)
         return self.dropout(out)
 
+
 class SelfAttention(Attention):
     def forward(self, *args, context = None, **kwargs):
         assert not exists(context), 'self attention should not receive context'
         return super().forward(*args, **kwargs)
+
 
 class CrossAttention(Attention):
     def forward(self, *args, context = None, **kwargs):
@@ -555,33 +565,34 @@ class FixedPositionalEmbedding(nn.Module):
 # performer
 
 class Performer(nn.Module):
+
     def __init__(
         self,
         dim,
         depth,
         heads,
         dim_head,
-        local_attn_heads = 0,
-        local_window_size = 256,
-        causal = False,
-        ff_mult = 4,
-        nb_features = None,
-        feature_redraw_interval = 1000,
-        reversible = False,
-        ff_chunks = 1,
-        generalized_attention = False,
-        kernel_fn = nn.ReLU(),
-        use_scalenorm = False,
-        use_rezero = False,
-        ff_glu = False,
-        ff_dropout = 0.,
-        attn_dropout = 0.,
-        cross_attend = False,
-        no_projection = False,
-        auto_check_redraw = True,
-        qkv_bias = True,
-        attn_out_bias = True,
-        shift_tokens = False,
+        local_attn_heads=0,
+        local_window_size=256,
+        causal=False,
+        ff_mult=4,
+        nb_features=None,
+        feature_redraw_interval=1000,
+        reversible=False,
+        ff_chunks=1,
+        generalized_attention=False,
+        kernel_fn=nn.ReLU(),
+        use_scalenorm=False,
+        use_rezero=False,
+        ff_glu=False,
+        ff_dropout=0.0,
+        attn_dropout=0.0,
+        cross_attend=False,
+        no_projection=False,
+        auto_check_redraw=True,
+        qkv_bias=True,
+        attn_out_bias=True,
+        shift_tokens=False,
     ):
         super().__init__()
         layers = nn.ModuleList([])
@@ -598,21 +609,21 @@ class Performer(nn.Module):
             wrapper_fn = partial(PreLayerNorm, dim)
 
         for _, local_heads in zip(range(depth), local_attn_heads):
-
             attn = SelfAttention(
                 dim,
-                causal = causal,
-                heads = heads,
-                dim_head = dim_head,
-                local_heads = local_heads,
-                local_window_size = local_window_size,
-                nb_features = nb_features,
-                generalized_attention = generalized_attention,
-                kernel_fn = kernel_fn,
-                dropout = attn_dropout,
-                no_projection = no_projection,
-                qkv_bias = qkv_bias,
-                attn_out_bias = attn_out_bias)
+                causal=causal,
+                heads=heads,
+                dim_head=dim_head,
+                local_heads=local_heads,
+                local_window_size=local_window_size,
+                nb_features=nb_features,
+                generalized_attention=generalized_attention,
+                kernel_fn=kernel_fn,
+                dropout=attn_dropout,
+                no_projection=no_projection,
+                qkv_bias=qkv_bias,
+                attn_out_bias=attn_out_bias,
+            )
             ff = Chunk(ff_chunks, FeedForward(dim, mult = ff_mult, dropout = ff_dropout, glu = ff_glu), along_dim = 1)
 
             if shift_tokens:
@@ -647,7 +658,10 @@ class Performer(nn.Module):
 
         route_attn = ((True, False),) * depth * (2 if cross_attend else 1)
         route_context = ((False, False), (True, False)) * depth
-        attn_route_map = {'mask': route_attn, 'pos_emb': route_attn}
+        attn_route_map = {
+            "mask": route_attn,
+            "pos_emb": route_attn,
+        }
         context_route_map = {'context': route_context, 'context_mask': route_context} if cross_attend else {}
         self.net = execute_type(layers, args_route = {**attn_route_map, **context_route_map})
 
