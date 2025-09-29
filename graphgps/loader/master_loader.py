@@ -439,7 +439,19 @@ def preformat_OGB_Graph(dataset_dir, name):
     Returns:
         PyG dataset object
     """
-    dataset = PygGraphPropPredDataset(name=name, root=dataset_dir)
+    pre_transform = T.Compose(
+        [
+            AddLaplacianEigenvectorAugPE(
+                16,  # num pos
+                random_sgn=False,
+                pos_eig_only=True,
+                attr_name="laplacian_eigenvector_pe",
+            ),
+        ]
+    )
+    dataset = PygGraphPropPredDataset(
+        name=name, root=dataset_dir, pre_transform=pre_transform
+    )
     s_dict = dataset.get_idx_split()
     dataset.split_idxs = [s_dict[s] for s in ['train', 'valid', 'test']]
 
