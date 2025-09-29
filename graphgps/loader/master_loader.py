@@ -442,7 +442,7 @@ def preformat_OGB_Graph(dataset_dir, name):
     pre_transform = T.Compose(
         [
             AddLaplacianEigenvectorAugPE(
-                16,  # num pos
+                k=cfg.gt.wire_num_pos,  # num pos
                 random_sgn=False,
                 pos_eig_only=True,
                 attr_name="laplacian_eigenvector_pe",
