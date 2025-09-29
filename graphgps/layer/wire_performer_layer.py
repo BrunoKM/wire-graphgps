@@ -509,7 +509,7 @@ def apply_rotary_pos_emb(q, k, sinu_pos):
 def apply_rope(q, k, angles):
     sin = angles.sin()  # Already of shape (b, h, n, dim_head//2)
     cos = angles.cos()  # Already of shape (b, h, n, dim_head//2)
-    sin, cos = map(lambda t: repeat(t, "b n -> b (n j)", j=2), (sin, cos))
+    sin, cos = map(lambda t: repeat(t, "b h n d -> b h n (d j)", j=2), (sin, cos))
     q, k = map(lambda t: (t * cos) + (rotate_every_two(t) * sin), (q, k))
     return q, k
 
