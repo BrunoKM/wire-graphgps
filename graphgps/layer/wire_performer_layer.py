@@ -374,22 +374,28 @@ class FeedForward(nn.Module):
         return x
 
 class Attention(nn.Module):
+
     def __init__(
         self,
         dim,
-        causal = False,
-        heads = 8,
-        dim_head = 64,
-        local_heads = 0,
-        local_window_size = 256,
-        nb_features = None,
-        feature_redraw_interval = 1000,
-        generalized_attention = False,
-        kernel_fn = nn.ReLU(),
-        dropout = 0.,
-        no_projection = False,
-        qkv_bias = False,
-        attn_out_bias = True
+        causal=False,
+        heads=8,
+        dim_head=64,
+        local_heads=0,
+        local_window_size=256,
+        nb_features=None,
+        feature_redraw_interval=1000,
+        generalized_attention=False,
+        kernel_fn=nn.ReLU(),
+        dropout=0.0,
+        no_projection=False,
+        qkv_bias=False,
+        attn_out_bias=True,
+        # RoPE arguments
+        rope_angle_scale=0.1,
+        num_pos=20,
+        rope_init_scale=0.1,
+        # trainable_scale=False,
     ):
         super().__init__()
         assert dim % heads == 0, 'dimension must be divisible by number of heads'
@@ -407,7 +413,23 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim, bias = attn_out_bias)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, pos_emb = None, context = None, mask = None, context_mask = None, **kwargs):
+        assert inner_dim % 2 == 0, "inner dimension must be even to use RoPE"
+        self.rope_angle_scale = rope_angle_scale
+        # if trainable_scale:
+        #     self.rope_angle_scale = nn.Parameter(torch.tensor(rope_angle_scale))
+        self.rope_pos_proj = nn.Linear(num_pos, inner_dim // 2, bias=qkv_bias)
+        self.rope_pos_proj.weight.data *= rope_init_scale
+
+    def forward(
+        self,
+        x,
+        wire_pe,
+        pos_emb=None,
+        context=None,
+        mask=None,
+        context_mask=None,
+        **kwargs,
+    ):
         b, n, _, h, gh = *x.shape, self.heads, self.global_heads
 
         cross_attend = exists(context)
@@ -430,6 +452,9 @@ class Attention(nn.Module):
             if exists(pos_emb) and not cross_attend:
                 q, k = apply_rotary_pos_emb(q, k, pos_emb)
 
+            angles = self.rope_pos_proj(wire_pe) * self.rope_angle_scale
+            q, k = apply_rope(q=q, k=k, angles=angles)
+
             out = self.fast_attention(q, k, v)
             attn_outs.append(out)
 
@@ -442,6 +467,7 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         out =  self.to_out(out)
         return self.dropout(out)
+
 
 class SelfAttention(Attention):
     def forward(self, *args, context = None, **kwargs):
@@ -478,6 +504,15 @@ def apply_rotary_pos_emb(q, k, sinu_pos):
     sin, cos = map(lambda t: repeat(t, 'b n -> b (n j)', j = 2), (sin, cos))
     q, k = map(lambda t: (t * cos) + (rotate_every_two(t) * sin), (q, k))
     return q, k
+
+
+def apply_rope(q, k, angles):
+    sin = angles.sin()  # Already of shape (b, h, n, dim_head//2)
+    cos = angles.cos()  # Already of shape (b, h, n, dim_head//2)
+    sin, cos = map(lambda t: repeat(t, "b n -> b (n j)", j=2), (sin, cos))
+    q, k = map(lambda t: (t * cos) + (rotate_every_two(t) * sin), (q, k))
+    return q, k
+
 
 # sinusoidal positional embeddings
 
