@@ -439,16 +439,33 @@ def preformat_OGB_Graph(dataset_dir, name):
     Returns:
         PyG dataset object
     """
-    pre_transform = T.Compose(
-        [
-            AddLaplacianEigenvectorAugPE(
-                k=cfg.gt.wire_num_pos,  # num pos
-                random_sgn=False,
-                pos_eig_only=True,
-                attr_name="laplacian_eigenvector_pe",
-            ),
-        ]
-    )
+    if name == "ogbg-ppa":
+        pre_transform = T.Compose(
+            [
+                AddLaplacianEigenvectorAugPE(
+                    k=cfg.gt.wire_num_pos,  # num pos
+                    random_sgn=False,
+                    pos_eig_only=True,
+                    attr_name="laplacian_eigenvector_pe",
+                ),
+            ]
+        )
+    elif name == "ogbg-code2":
+        pre_transform = T.Compose(
+            [
+                # Subset graphs to a maximum size (number of nodes) limit.
+                partial(clip_graphs_to_size, size_limit=1000),
+                AddLaplacianEigenvectorAugPE(
+                    k=cfg.gt.wire_num_pos,  # num pos
+                    random_sgn=False,
+                    pos_eig_only=True,
+                    attr_name="laplacian_eigenvector_pe",
+                ),
+            ]
+        )
+    else:
+        raise ValueError(f"Unsupported OGB Graph dataset: {name}")
+
     dataset = PygGraphPropPredDataset(
         name=name, root=dataset_dir, pre_transform=pre_transform
     )
@@ -485,10 +502,6 @@ def preformat_OGB_Graph(dataset_dir, name):
         dataset.transform = T.Compose(
             [augment_edge,
              lambda data: encode_y_to_arr(data, vocab2idx, max_seq_len)])
-
-        # Subset graphs to a maximum size (number of nodes) limit.
-        pre_transform_in_memory(dataset, partial(clip_graphs_to_size,
-                                                 size_limit=1000))
 
     return dataset
 
