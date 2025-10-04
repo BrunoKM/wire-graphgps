@@ -78,4 +78,6 @@ def clip_graphs_to_size(data, size_limit=5000):
         data.edge_index = edge_index
         if hasattr(data, 'edge_attr'):
             data.edge_attr = edge_attr
+        if hasattr(data, "laplacian_eigenvector_pe"):  # WIRE
+            data.laplacian_eigenvector_pe = data.laplacian_eigenvector_pe[:size_limit]
         return data

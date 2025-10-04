@@ -453,14 +453,14 @@ def preformat_OGB_Graph(dataset_dir, name):
     elif name == "ogbg-code2":
         pre_transform = T.Compose(
             [
-                # Subset graphs to a maximum size (number of nodes) limit.
-                partial(clip_graphs_to_size, size_limit=1000),
                 AddLaplacianEigenvectorAugPE(
                     k=cfg.gt.wire_num_pos,  # num pos
                     random_sgn=False,
                     pos_eig_only=True,
                     attr_name="laplacian_eigenvector_pe",
                 ),
+                # Subset graphs to a maximum size (number of nodes) limit.
+                partial(clip_graphs_to_size, size_limit=1000),
             ]
         )
     else:
