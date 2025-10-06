@@ -447,6 +447,7 @@ def preformat_OGB_Graph(dataset_dir, name):
                     random_sgn=False,
                     pos_eig_only=True,
                     attr_name="laplacian_eigenvector_pe",
+                    normalize=False,
                 ),
             ]
         )
@@ -458,6 +459,7 @@ def preformat_OGB_Graph(dataset_dir, name):
                     random_sgn=False,
                     pos_eig_only=True,
                     attr_name="laplacian_eigenvector_pe",
+                    normalize=False,
                 ),
                 # Subset graphs to a maximum size (number of nodes) limit.
                 partial(clip_graphs_to_size, size_limit=1000),
@@ -471,6 +473,11 @@ def preformat_OGB_Graph(dataset_dir, name):
     )
     s_dict = dataset.get_idx_split()
     dataset.split_idxs = [s_dict[s] for s in ['train', 'valid', 'test']]
+    # Compute a normalization factor for laplacian PE:
+    num_nodes = sum([data.laplacian_eigenvector_pe.shape[0] for data in dataset.data])
+    mean = sum(
+        [data.laplacian_eigenvector_pe.sum(dim=0).item() for data in dataset.data]
+    ) / sum(data.num_nodes for data in dataset.data)
 
     if name == 'ogbg-ppa':
         # ogbg-ppa doesn't have any node features, therefore add zeros but do
