@@ -452,6 +452,10 @@ class Attention(nn.Module):
             if exists(pos_emb) and not cross_attend:
                 q, k = apply_rotary_pos_emb(q, k, pos_emb)
 
+            # Possibly filter wire_pe on NaNs (some graphs might be smaller than max num pos embeddings)
+            wire_pe = torch.where(
+                torch.isnan(wire_pe), torch.zeros_like(wire_pe), wire_pe
+            )
             angles = self.rope_pos_proj(wire_pe) * self.rope_angle_scale
             angles = rearrange(angles, "b n (h d) -> b h n d", h=h)
             q, k = apply_rope(q=q, k=k, angles=angles)
