@@ -392,9 +392,9 @@ class Attention(nn.Module):
         qkv_bias=False,
         attn_out_bias=True,
         # RoPE arguments
-        rope_angle_scale=0.1,
+        rope_angle_scale=1.0,
         num_pos=20,
-        rope_init_scale=0.1,
+        rope_init_scale=1e-6,
         # trainable_scale=False,
     ):
         super().__init__()
