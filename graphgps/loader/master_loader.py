@@ -10,6 +10,8 @@ import torch.nn.functional as F
 import torch_geometric.transforms as T
 from torch_geometric.data import Data
 from numpy.random import default_rng
+from numpy.linalg import eig, eigh
+from scipy.sparse.linalg import eigs, eigsh
 from ogb.graphproppred import PygGraphPropPredDataset
 from torch_geometric.datasets import (Actor, GNNBenchmarkDataset, Planetoid,
                                       TUDataset, WebKB, WikipediaNetwork, ZINC)
@@ -40,6 +42,7 @@ def add_node_attr(data: Data, value: torch.Tensor, attr_name: str) -> Data:
 class AddLaplacianEigenvectorAugPE(AddLaplacianEigenvectorPE):
 
     SPARSE_THRESHOLD: int = 100
+    DENSE_RETRY_THRESHOLD: int = 5000
 
     def __init__(
         self,
@@ -48,7 +51,6 @@ class AddLaplacianEigenvectorAugPE(AddLaplacianEigenvectorPE):
         is_undirected: bool = False,
         normalization: Optional[str] = "sym",
         random_sgn: bool = True,
-        normalize: bool = True,
         pos_eig_only: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -59,7 +61,6 @@ class AddLaplacianEigenvectorAugPE(AddLaplacianEigenvectorPE):
         self.normalization = normalization
         self.kwargs = kwargs
         self.random_sgn = random_sgn
-        self.normalize = normalize
         self.pos_eig_only = pos_eig_only
 
     def forward(self, data: Data) -> Data:
@@ -77,14 +78,11 @@ class AddLaplacianEigenvectorAugPE(AddLaplacianEigenvectorPE):
         L = to_scipy_sparse_matrix(edge_index, edge_weight, num_nodes)
 
         if num_nodes < self.SPARSE_THRESHOLD:
-            from numpy.linalg import eig, eigh
 
             eig_fn = eig if not self.is_undirected else eigh
 
             eig_vals, eig_vecs = eig_fn(L.todense())
         else:
-            from scipy.sparse.linalg import eigs, eigsh
-
             eig_fn = eigs if not self.is_undirected else eigsh
             try:
                 eig_vals, eig_vecs = eig_fn(
@@ -95,11 +93,15 @@ class AddLaplacianEigenvectorAugPE(AddLaplacianEigenvectorPE):
                     **self.kwargs,
                 )
             except:
-                print(
-                    "Eigenvalue and eigenvector construction failed, defaulting to all 0's."
-                )
-                eig_vals = np.zeros(self.k + 1)
-                eig_vecs = np.zeros((num_nodes, self.k + 1))
+                eig_fn = eig if not self.is_undirected else eigh
+                try:
+                    eig_vals, eig_vecs = eig_fn(L.todense())
+                except:
+                    print(
+                        "Eigenvalue and eigenvector construction failed, defaulting to all 0's."
+                    )
+                    eig_vals = np.zeros(self.k + 1) * np.nan
+                    eig_vecs = np.zeros((num_nodes, self.k + 1)) * np.nan
 
         idx = eig_vals.argsort()
         eig_vecs = np.real(eig_vecs[:, idx])
@@ -109,22 +111,17 @@ class AddLaplacianEigenvectorAugPE(AddLaplacianEigenvectorPE):
         else:
             eig_vals = torch.from_numpy(np.real(eig_vals))
 
+        pe = torch.from_numpy(eig_vecs[:, 1 : self.k + 1]).float()
         if num_nodes <= self.k:
-            pe = torch.from_numpy(eig_vecs[:, 1:num_nodes])
             eig_vals = F.pad(
                 eig_vals, (0, self.k - num_nodes), value=float("nan")
             ).unsqueeze(0)
-            if self.normalize:
-                pe = F.normalize(pe, p=2, dim=-1)
             # Pad with zeros to the right length k
             # padding = torch.zeros(num_nodes, self.k - pe.size(1))
             # pe = torch.cat([pe, padding], dim=1)
             pe = F.pad(pe, (0, self.k - pe.size(1)), value=float("nan"))
         else:
-            pe = torch.from_numpy(eig_vecs[:, 1 : self.k + 1]).float()
             eig_vals = eig_vals[1 : self.k + 1]
-            if self.normalize:
-                pe = F.normalize(pe, p=2, dim=-1)
 
         if self.random_sgn:
             sign = -1 + 2 * torch.randint(0, 2, (self.k,))
@@ -240,7 +237,7 @@ def load_dataset_master(format, name, dataset_dir):
 
         elif pyg_dataset_id == 'ZINC':
             dataset = preformat_ZINC(dataset_dir, name)
-            
+
         elif pyg_dataset_id == 'AQSOL':
             dataset = preformat_AQSOL(dataset_dir, name)
 
@@ -447,7 +444,6 @@ def preformat_OGB_Graph(dataset_dir, name):
                     random_sgn=False,
                     pos_eig_only=True,
                     attr_name="laplacian_eigenvector_pe",
-                    normalize=False,
                 ),
             ]
         )
@@ -459,7 +455,6 @@ def preformat_OGB_Graph(dataset_dir, name):
                     random_sgn=False,
                     pos_eig_only=True,
                     attr_name="laplacian_eigenvector_pe",
-                    normalize=False,
                 ),
                 # Subset graphs to a maximum size (number of nodes) limit.
                 partial(clip_graphs_to_size, size_limit=1000),
@@ -474,10 +469,43 @@ def preformat_OGB_Graph(dataset_dir, name):
     s_dict = dataset.get_idx_split()
     dataset.split_idxs = [s_dict[s] for s in ['train', 'valid', 'test']]
     # Compute a normalization factor for laplacian PE:
-    num_nodes = sum([data.laplacian_eigenvector_pe.shape[0] for data in dataset.data])
-    mean = sum(
-        [data.laplacian_eigenvector_pe.sum(dim=0).item() for data in dataset.data]
-    ) / sum(data.num_nodes for data in dataset.data)
+    num_nonnan_nodes = sum(
+        [
+            torch.where(
+                (lap_pe := data.laplacian_eigenvector_pe).isnan(),
+                torch.zeros_like(lap_pe),
+                torch.ones_like(lap_pe),
+            ).mean(dim=0, keepdim=True)
+            for data in dataset
+        ]
+    )
+    sum_of_lap_pe = sum(
+        [
+            torch.where(
+                (lap_pe := data.laplacian_eigenvector_pe).isnan(),
+                torch.zeros_like(lap_pe),
+                lap_pe,
+            ).mean(dim=0, keepdim=True)
+            for data in dataset
+        ]
+    )
+    mean_of_lap_pe = sum_of_lap_pe / num_nonnan_nodes
+    variance_of_lap_pe = sum(
+        [
+            torch.where(
+                (lap_pe := data.laplacian_eigenvector_pe).isnan(),
+                torch.zeros_like(lap_pe),
+                (lap_pe - mean_of_lap_pe) ** 2,
+            ).mean(dim=0, keepdim=True)
+            for data in dataset
+        ]
+    )
+
+    def normalize_lap_pe(data, eps: float = 1e-10):
+        data.laplacian_eigenvector_pe = (
+            data.laplacian_eigenvector_pe - mean_of_lap_pe
+        ) / torch.sqrt(variance_of_lap_pe + eps)
+        return data
 
     if name == 'ogbg-ppa':
         # ogbg-ppa doesn't have any node features, therefore add zeros but do
@@ -486,7 +514,12 @@ def preformat_OGB_Graph(dataset_dir, name):
         def add_zeros(data):
             data.x = torch.zeros(data.num_nodes, dtype=torch.long)
             return data
-        dataset.transform = add_zeros
+        dataset.transform = T.Compose(
+            [
+                add_zeros,
+                normalize_lap_pe,
+            ]
+        )
     elif name == 'ogbg-code2':
         from graphgps.loader.ogbg_code2_utils import idx2vocab, \
             get_vocab_mapping, augment_edge, encode_y_to_arr
@@ -507,8 +540,12 @@ def preformat_OGB_Graph(dataset_dir, name):
         # augment_edge: add next-token edge as well as inverse edges. add edge attributes.
         # encode_y_to_arr: add y_arr to PyG data object, indicating the array repres
         dataset.transform = T.Compose(
-            [augment_edge,
-             lambda data: encode_y_to_arr(data, vocab2idx, max_seq_len)])
+            [
+                normalize_lap_pe,
+                augment_edge,
+                lambda data: encode_y_to_arr(data, vocab2idx, max_seq_len),
+            ]
+        )
 
     return dataset
 
