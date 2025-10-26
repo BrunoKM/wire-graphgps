@@ -8,6 +8,8 @@ from torch_geometric.data import Batch
 from torch_geometric.nn import Linear as Linear_pyg
 from torch_geometric.utils import to_dense_batch
 
+from graphgps.layer.wire_performer_layer import SelfAttention as WireSelfAttention
+
 from graphgps.layer.bigbird_layer import SingleBigBirdLayer
 from graphgps.layer.gatedgcn_layer import GatedGCNLayer
 from graphgps.layer.gine_conv_layer import GINEConvESLapPE
@@ -21,7 +23,7 @@ class GPSLayer(nn.Module):
                  local_gnn_type, global_model_type, num_heads, act='relu',
                  pna_degrees=None, equivstable_pe=False, dropout=0.0,
                  attn_dropout=0.0, layer_norm=False, batch_norm=True,
-                 bigbird_cfg=None, log_attn_weights=False):
+                 bigbird_cfg=None, log_attn_weights=False, wire_num_pos=16,):
         super().__init__()
 
         self.dim_h = dim_h
@@ -112,6 +114,11 @@ class GPSLayer(nn.Module):
             self.self_attn = SelfAttention(
                 dim=dim_h, heads=num_heads,
                 dropout=self.attn_dropout, causal=False)
+        elif global_model_type == "WirePerformer":
+            self.self_attn = WireSelfAttention(
+                dim=dim_h, heads=num_heads, dropout=self.attn_dropout, causal=False,
+                num_pos=wire_num_pos,
+            )
         elif global_model_type == "BigBird":
             bigbird_cfg.dim_hidden = dim_h
             bigbird_cfg.n_heads = num_heads
@@ -204,6 +211,11 @@ class GPSLayer(nn.Module):
                 h_attn = self._sa_block(h_dense, batch.attn_bias, ~mask)[mask]
             elif self.global_model_type == 'Performer':
                 h_attn = self.self_attn(h_dense, mask=mask)[mask]
+            elif self.global_model_type == "WirePerformer":
+                wire_pe = batch.laplacian_eigenvector_pe
+                wire_pe, _ = to_dense_batch(wire_pe, batch.batch)
+                # wire_pe
+                h_attn = self.self_attn(h_dense, mask=mask, wire_pe=wire_pe)[mask]
             elif self.global_model_type == 'BigBird':
                 h_attn = self.self_attn(h_dense, attention_mask=mask)
             else:
